@@ -33,5 +33,9 @@
     ],
     "charge_limit_range": "80%-90%",
     "auto_charge_behavior": "bclm设上限后，SMC自动管理：到上限停，掉几个百分点自动补"
-  }
+  },
+  "upper_limit": 90,
+  "lower_limit": 20,
+  "limit_enabled": true,
+  "check_interval": 120
 }
