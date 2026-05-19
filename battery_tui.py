@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""🔋 电池管理 - 紧凑版，适配 80x40 终端"""
+"""🔋 电池管理 - TUI v3 带配置面板"""
 
 import subprocess, re, json, os, sys
 from datetime import datetime
-
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Container
 from textual.widgets import Header, Footer, Static, Button, RichLog
@@ -31,7 +30,9 @@ def load_config():
     if os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH) as f:
             return json.load(f)
-    return {"strategy": "balanced", "charge_limit": 80}
+    return {"strategy": "balanced", "charge_limit": 80, "upper_limit": 80,
+            "lower_limit": 20, "limit_enabled": True, "check_interval": 120,
+            "temp_threshold_c": 35}
 
 def save_config(cfg):
     with open(CONFIG_PATH, "w") as f:
@@ -52,7 +53,7 @@ def read_battery():
     if m:
         info["remaining"] = m.group(1)
     ioreg = run_cmd("ioreg -l -w0")
-    for key in ["DesignCapacity", "MaxCapacity", "CycleCount", "Temperature", "Voltage"]:
+    for key in ["DesignCapacity", "MaxCapacity", "CycleCount", "Temperature"]:
         m = re.search(rf'"{key}"\s*=\s*(\d+)', ioreg)
         if m:
             info[key.lower()] = int(m.group(1))
@@ -64,11 +65,19 @@ def read_battery():
     m = re.search(r"Condition:\s*(\w+)", sp)
     if m:
         info["condition"] = m.group(1)
-    m = re.search(r'"CellVoltage"=\(([\d,]+)\)', ioreg)
-    if m:
-        cells = [int(x) for x in m.group(1).split(",")]
-        info["cell_voltage_avg"] = round(sum(cells) / len(cells))
     return info
+
+def get_daemon_status():
+    pid_file = os.path.expanduser("~/.hermes/scripts/battery_daemon.pid")
+    if os.path.exists(pid_file):
+        with open(pid_file) as f:
+            pid = f.read().strip()
+        try:
+            os.kill(int(pid), 0)
+            return True, pid
+        except (ProcessLookupError, ValueError):
+            pass
+    return False, None
 
 
 class BatteryTUI(App):
@@ -78,6 +87,7 @@ class BatteryTUI(App):
     #mid_row { layout: horizontal; height: auto; margin: 0 1; }
     #health_panel { width: 1fr; }
     #control_panel { width: 1fr; }
+    #config_panel { width: 1fr; }
     #log_panel { height: 1fr; margin: 0 1; }
     Button { margin: 0 0 0 0; min-width: 8; }
     Horizontal { height: auto; layout: horizontal; }
@@ -91,7 +101,6 @@ class BatteryTUI(App):
     def compose(self):
         self.config = load_config()
         self.battery_data = read_battery()
-
         yield Header()
         with Container(id="status_panel"):
             yield Static(self._render_status(), id="status_display")
@@ -114,10 +123,23 @@ class BatteryTUI(App):
                 with Horizontal():
                     yield Button("90%", id="strat_performance")
                     yield Button("100%", id="strat_full", variant="warning")
-                yield Button("🔄刷新", id="btn_refresh")
+            with Container(id="config_panel"):
+                yield Static(self._render_config(), id="config_display")
+                with Horizontal():
+                    yield Button("上限➖5", id="cfg_upper_down")
+                    yield Button("上限➕5", id="cfg_upper_up")
+                with Horizontal():
+                    yield Button("下限➖5", id="cfg_lower_down")
+                    yield Button("下限➕5", id="cfg_lower_up")
+                with Horizontal():
+                    yield Button("⏱️➖60s", id="cfg_interval_down")
+                    yield Button("⏱️➕60s", id="cfg_interval_up")
+                with Horizontal():
+                    yield Button("🔄刷新", id="btn_refresh")
+                    yield Button("🚀守护", id="btn_daemon")
         with Container(id="log_panel"):
             yield RichLog(id="log", highlight=True, markup=True)
-            yield Static("[dim]SMC=芯片，写入即生效但重启丢 | 持久化=重启保持[/dim]")
+            yield Static("[dim]配置: 上下限→守护进程 | 写入/持久化→SMC芯片[/dim]")
         yield Footer()
 
     def _render_status(self):
@@ -149,14 +171,27 @@ class BatteryTUI(App):
         d = self.battery_data
         cfg = self.config
         limit = d.get("charge_limit", 0) or 0
-        target = cfg.get("charge_limit", 80)
+        target = cfg.get("charge_limit", cfg.get("upper_limit", 80))
         pct = d.get("percentage", 0) or 0
         if limit == target:
             s = "[green]✅已生效[/green]"
         else:
-            s = f"[yellow]SMC={limit}%→目标={target}%[/yellow]"
+            s = f"[yellow]SMC={limit}%→{target}%[/yellow]"
         note = f"{'停止充电' if pct>=target else f'充电到{target}%停止'}"
-        return f"[bold]🎛️ 控制[/bold] {s}\n 电量{pct}% {note} | 策略:{cfg.get('strategy','?')}"
+        return f"[bold]🎛️ 控制[/bold] {s}\n 电量{pct}% {note}"
+
+    def _render_config(self):
+        cfg = self.config
+        upper = cfg.get("upper_limit", 90)
+        lower = cfg.get("lower_limit", 20)
+        interval = cfg.get("check_interval", 120)
+        running, pid = get_daemon_status()
+        dm = "运行中" if running else "未运行"
+        return (
+            f"[bold]⚙️ 配置[/bold] 守护:{dm}\n"
+            f" 上限:{upper}% 下限:{lower}%\n"
+            f" 间隔:{interval}s 温度:{cfg.get('temp_threshold_c',35)}°C"
+        )
 
     def on_mount(self):
         self.set_interval(30, self.auto_refresh)
@@ -170,6 +205,7 @@ class BatteryTUI(App):
         self.query_one("#status_display").update(self._render_status())
         self.query_one("#health_display").update(self._render_health())
         self.query_one("#control_display").update(self._render_control())
+        self.query_one("#config_display").update(self._render_config())
 
     def log_msg(self, msg):
         self.query_one("#log").write(msg)
@@ -177,32 +213,100 @@ class BatteryTUI(App):
     def on_button_pressed(self, event):
         btn = event.button.id
         cfg = self.config
-        current = cfg.get("charge_limit", 80)
-        if btn == "btn_down10": self._set_target(max(20, current - 10))
-        elif btn == "btn_down5": self._set_target(max(20, current - 5))
-        elif btn == "btn_up5": self._set_target(min(100, current + 5))
-        elif btn == "btn_up10": self._set_target(min(100, current + 10))
+        current = cfg.get("charge_limit", cfg.get("upper_limit", 80))
+
+        # ── SMC 上限调节 ──
+        if btn == "btn_down10": self._set_upper(max(20, current - 10))
+        elif btn == "btn_down5": self._set_upper(max(20, current - 5))
+        elif btn == "btn_up5": self._set_upper(min(100, current + 5))
+        elif btn == "btn_up10": self._set_upper(min(100, current + 10))
+
+        # ── 写入/持久化 ──
         elif btn == "btn_apply":
-            target = cfg.get("charge_limit", 80)
+            target = cfg.get("upper_limit", 90)
             self.log_msg(f"[yellow]📋 写入SMC: {target}%[/yellow]")
             self._run_sudo(f"sudo bclm write {target}", f"✅ SMC={target}%")
         elif btn == "btn_persist":
             self.log_msg("[green]💾 持久化...[/green]")
             self._run_sudo("sudo bclm persist", "✅ 持久化成功")
-        elif btn == "btn_refresh":
-            self.refresh_data()
-            self.log_msg("[green]✅ 已刷新[/green]")
+
+        # ── 策略 ──
         elif btn.startswith("strat_"):
             s = btn.replace("strat_", "")
             if s in STRATEGIES:
                 cfg["strategy"] = s
                 cfg["charge_limit"] = STRATEGIES[s]["charge_limit"]
+                cfg["upper_limit"] = STRATEGIES[s]["charge_limit"]
                 save_config(cfg)
                 self.config = cfg
-                self.log_msg(f"[cyan]🎛️ {STRATEGIES[s]['desc']} → {cfg['charge_limit']}%[/cyan]")
+                self.log_msg(f"[cyan]🎛️ {STRATEGIES[s]['desc']} → {cfg['upper_limit']}%[/cyan]")
                 self.refresh_data()
 
-    def _set_target(self, limit):
+        # ── 配置: 上限 ──
+        elif btn == "cfg_upper_down":
+            new = max(20, cfg.get("upper_limit", 90) - 5)
+            cfg["upper_limit"] = new
+            cfg["charge_limit"] = new
+            save_config(cfg)
+            self.config = cfg
+            self.log_msg(f"[dim]上限 → {new}%[/dim]")
+            self.refresh_data()
+        elif btn == "cfg_upper_up":
+            new = min(100, cfg.get("upper_limit", 90) + 5)
+            cfg["upper_limit"] = new
+            cfg["charge_limit"] = new
+            save_config(cfg)
+            self.config = cfg
+            self.log_msg(f"[dim]上限 → {new}%[/dim]")
+            self.refresh_data()
+
+        # ── 配置: 下限 ──
+        elif btn == "cfg_lower_down":
+            new = max(0, cfg.get("lower_limit", 20) - 5)
+            cfg["lower_limit"] = new
+            save_config(cfg)
+            self.config = cfg
+            self.log_msg(f"[dim]下限 → {new}%[/dim]")
+            self.refresh_data()
+        elif btn == "cfg_lower_up":
+            new = min(80, cfg.get("lower_limit", 20) + 5)
+            cfg["lower_limit"] = new
+            save_config(cfg)
+            self.config = cfg
+            self.log_msg(f"[dim]下限 → {new}%[/dim]")
+            self.refresh_data()
+
+        # ── 配置: 间隔 ──
+        elif btn == "cfg_interval_down":
+            new = max(30, cfg.get("check_interval", 120) - 60)
+            cfg["check_interval"] = new
+            save_config(cfg)
+            self.config = cfg
+            self.log_msg(f"[dim]间隔 → {new}s[/dim]")
+            self.refresh_data()
+        elif btn == "cfg_interval_up":
+            new = min(600, cfg.get("check_interval", 120) + 60)
+            cfg["check_interval"] = new
+            save_config(cfg)
+            self.config = cfg
+            self.log_msg(f"[dim]间隔 → {new}s[/dim]")
+            self.refresh_data()
+
+        # ── 刷新 ──
+        elif btn == "btn_refresh":
+            self.refresh_data()
+            self.log_msg("[green]✅ 已刷新[/green]")
+
+        # ── 守护进程 ──
+        elif btn == "btn_daemon":
+            running, pid = get_daemon_status()
+            if running:
+                self.log_msg("[yellow]🚀 守护进程已在运行[/yellow]")
+            else:
+                self.log_msg("[green]🚀 启动守护进程...[/green]")
+                self._start_daemon()
+
+    def _set_upper(self, limit):
         cfg = self.config
         for name, s in STRATEGIES.items():
             if s["charge_limit"] == limit:
@@ -211,9 +315,10 @@ class BatteryTUI(App):
         else:
             cfg["strategy"] = "custom"
         cfg["charge_limit"] = limit
+        cfg["upper_limit"] = limit
         save_config(cfg)
         self.config = cfg
-        self.log_msg(f"[dim]目标 → {limit}%[/dim]")
+        self.log_msg(f"[dim]目标上限 → {limit}%[/dim]")
         self.refresh_data()
 
     @work(exclusive=True, thread=True)
@@ -225,6 +330,16 @@ class BatteryTUI(App):
         )
         subprocess.run(["osascript", "-e", script], capture_output=True, timeout=10)
         self.log_msg(f"[dim]执行: {cmd}[/dim]")
+
+    @work(exclusive=True, thread=True)
+    def _start_daemon(self):
+        script = (
+            'tell application "Terminal" to activate\n'
+            'tell application "Terminal" to do script '
+            '"python3 ~/.hermes/scripts/battery_daemon.py --daemon"\n'
+        )
+        subprocess.run(["osascript", "-e", script], capture_output=True, timeout=10)
+        self.log_msg("[dim]已在Terminal启动守护进程[/dim]")
 
     def key_q(self):
         self.exit()
@@ -239,11 +354,10 @@ def headless_mode():
     table.add_column("值")
     table.add_row("电量", f"{info.get('percentage', '?')}%")
     table.add_row("充电上限", f"{info.get('charge_limit', '?')}%")
-    table.add_row("策略", cfg.get("strategy", "balanced"))
+    table.add_row("上限", f"{cfg.get('upper_limit', '?')}%")
+    table.add_row("下限", f"{cfg.get('lower_limit', '?')}%")
     table.add_row("健康度", f"{info.get('health_pct', '?')}%")
-    table.add_row("状态", info.get("condition", "?"))
     table.add_row("容量", f"{info.get('maxcapacity', '?')}/{info.get('designcapacity', '?')} mAh")
-    table.add_row("循环", f"{info.get('cyclecount', '?')}")
     table.add_row("温度", f"{info.get('temperature_c', '?')}°C")
     console.print(table)
 
