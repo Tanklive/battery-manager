@@ -1,0 +1,37 @@
+{
+  "strategy": "custom",
+  "charge_limit": 85,
+  "temp_threshold_c": 35,
+  "health_alert_pct": 80,
+  "calibration_interval_days": 30,
+  "strategies": {
+    "conservative": {
+      "charge_limit": 60,
+      "description": "🛡️ 保守 - 长期插电最大保护（不推荐，Apple建议80%以上）"
+    },
+    "balanced": {
+      "charge_limit": 80,
+      "description": "⚖️ 平衡 - Apple官方推荐，日常最佳"
+    },
+    "performance": {
+      "charge_limit": 90,
+      "description": "⚡ 性能 - 需要较长续航时"
+    },
+    "full": {
+      "charge_limit": 100,
+      "description": "🔋 满电 - 出行前临时使用"
+    }
+  },
+  "apple_recommendation": {
+    "source": "apple.com/batteries + support.apple.com/zh-cn/102338",
+    "key_points": [
+      "锂电池在40%-80%区间工作寿命最长",
+      "避免长时间保持100%电量",
+      "保持优化电池充电开启（T2/Apple Silicon）",
+      "工作温度10°C~35°C",
+      "长期存放充到50%"
+    ],
+    "charge_limit_range": "80%-90%",
+    "auto_charge_behavior": "bclm设上限后，SMC自动管理：到上限停，掉几个百分点自动补"
+  }
+}
